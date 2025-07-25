@@ -9,18 +9,7 @@ using JSON
 using ProgressMeter
 using Parameters
 
-@with_kw struct Hyperparameters
-    N_TREES::Int
-    N_SAMPLES::Int
-    N_FEAT_SIGNAL::Int
-    N_FEAT_NOISY::Int
-    SIGNAL_COEFFS::Vector{Float64}
-    EPS_STD::Float64
-    MAX_DEPTH::Int
-    MTRY::Int
-    NODESIZE::Int
-    RNG_SEED::Int
-end
+include("types.jl")
 
 """
 Generate synthetic dataset with signal and noise features based on a linear model.
@@ -28,17 +17,17 @@ Generate synthetic dataset with signal and noise features based on a linear mode
 function gen_linear_data(
     n_samples::Int,
     signal_coeffs::Vector{Float64},
-    n_noise_features::Int,
+    n_feat_noise::Int,
     noise_std::Float64,
     rng::Random.AbstractRNG,
 )
-    n_signal = length(signal_coeffs)
+    n_feat_signal = length(signal_coeffs)
 
     # Generate signal features (uniform distribution)
-    x_signal = rand(rng, n_samples, n_signal)
+    x_signal = rand(rng, n_samples, n_feat_signal)
 
-    # Generate noise features (uniform distribution)
-    z_noise = rand(rng, n_samples, n_noise_features)
+    # Generate noise features (normal distribution)
+    z_noise = randn(rng, n_samples, n_feat_noise)
 
     # Combine into a single feature matrix
     x_noisy = hcat(x_signal, z_noise)
@@ -53,44 +42,55 @@ end
 """
 Generate a systematic filename from hyperparameters struct.
 """
-function params_to_filename(params::Hyperparameters)
+function pms_to_exp_name(pms::Hyperparameters)
     parts = [
-        "d$(params.N_FEAT_SIGNAL)",
-        "p$(params.N_FEAT_NOISY)",
-        "m$(params.MTRY)",
-        "k$(params.MAX_DEPTH)",
-        "n$(params.N_SAMPLES)",
-        "M$(params.N_TREES)",
+        "d$(pms.N_FEAT_SIGNAL)",
+        "p$(pms.N_FEAT_NOISY)",
+        "m$(pms.MTRY)",
+        "k$(pms.MAX_DEPTH)",
+        "n$(pms.N_SAMPLES)",
+        "M$(pms.N_TREES)",
     ]
     return join(parts, "_")
 end
 
 
-function run_sim(params::Hyperparameters)
+function run_sim(pms::Hyperparameters; results_dir="results")
     # 1. Setup and print parameters
     println("Initializing Simulation...")
+
+    # Check for existing results directory before running the simulation
+    exp_name = pms_to_exp_name(pms)
+    exp_dir = joinpath(results_dir, exp_name)
+    if isdir(exp_dir)
+        error(
+            "Results directory already exists for this parameter set: `$exp_dir`\n" *
+            "Please move or delete it before re-running to avoid overwriting results.",
+        )
+    end
+
     println("Parameters:")
     for field in fieldnames(Hyperparameters)
-        println("    - ", rpad(string(field), 15), ": ", getfield(params, field))
+        println("    - ", rpad(string(field), 15), ": ", getfield(pms, field))
     end
-    println("    - Threads        : ", Threads.nthreads())
+    println("    - THREADS        : ", Threads.nthreads())
     println("\n")
 
-    N_FEAT_TOTAL = params.N_FEAT_SIGNAL + params.N_FEAT_NOISY
-    master_rng = MersenneTwister(params.RNG_SEED)
-    all_mdi_noisy = zeros(N_FEAT_TOTAL, params.MAX_DEPTH, params.N_TREES)
-    all_mdi_signal = zeros(params.N_FEAT_SIGNAL, params.MAX_DEPTH, params.N_TREES)
+    N_FEAT_TOTAL = pms.N_FEAT_SIGNAL + pms.N_FEAT_NOISY
+    master_rng = MersenneTwister(pms.RNG_SEED)
+    all_mdi_noisy = zeros(N_FEAT_TOTAL, pms.MAX_DEPTH, pms.N_TREES)
+    all_mdi_signal = zeros(pms.N_FEAT_SIGNAL, pms.MAX_DEPTH, pms.N_TREES)
 
     # Generate synthetic data once for all runs
     X_signal, X_noisy, y = gen_linear_data(
-        params.N_SAMPLES, params.SIGNAL_COEFFS, params.N_FEAT_NOISY, params.EPS_STD, master_rng
+        pms.N_SAMPLES, pms.SIGNAL_COEFFS, pms.N_FEAT_NOISY, pms.EPS_STD, master_rng
     )
 
     # 2. Fitting all trees
-    p = Progress(params.N_TREES, "Fitting $(params.N_TREES) noisy and signal trees:")
+    p = Progress(pms.N_TREES, "Fitting $(pms.N_TREES) noisy and signal trees:")
 
     master_seed = rand(master_rng, UInt)
-    @time Threads.@threads for i in 1:params.N_TREES
+    @time Threads.@threads for i in 1:pms.N_TREES
         # Create a thread-safe RNG for each iteration
         local_rng = MersenneTwister(master_seed + i)
 
@@ -98,9 +98,9 @@ function run_sim(params::Hyperparameters)
         noisy_tree = build_tree(
             y,
             X_noisy,
-            params.MTRY,
-            params.MAX_DEPTH,
-            params.NODESIZE;
+            pms.MTRY,
+            pms.MAX_DEPTH,
+            pms.NODESIZE;
             rng=local_rng,
             impurity_importance=true,
         )
@@ -109,9 +109,9 @@ function run_sim(params::Hyperparameters)
         signal_tree = build_tree(
             y,
             X_signal,
-            params.MTRY,
-            params.MAX_DEPTH,
-            params.NODESIZE;
+            pms.MTRY,
+            pms.MAX_DEPTH,
+            pms.NODESIZE;
             rng=local_rng,
             impurity_importance=true,
         )
@@ -125,63 +125,36 @@ function run_sim(params::Hyperparameters)
     println("Simulation finished successfully.")
 
     # 3. Saving results
-    base_filename = params_to_filename(params)
-    results_dir = "results"
-    mkpath(results_dir)
+    mkpath(exp_dir)
+    println("Saving results to `$exp_dir`...")
 
-    arrow_path = joinpath(results_dir, base_filename * ".arrow")
-    json_path = joinpath(results_dir, base_filename * ".json")
-
-    # Check if files already exist to prevent accidental overwrites
-    if isfile(arrow_path) || isfile(json_path)
-        error(
-            "Results files already exist for this parameter set:\n" *
-            "  - $arrow_path\n" *
-            "  - $json_path\n" *
-            "Please move or delete them before re-running.",
-        )
-    end
-
-    println("Saving results to `$arrow_path` and `$json_path`...")
+    # Define file paths
+    json_path = joinpath(exp_dir, "params_$(exp_name).json")
+    arrow_path = joinpath(exp_dir, "mdi_$(exp_name).arrow")
+    dataset_path = joinpath(exp_dir, "dataset_$(exp_name).arrow")
 
     # Convert struct to dict for JSON saving
-    params_dict = Dict(string(field) => getfield(params, field) for field in fieldnames(Hyperparameters))
+    pms_dict = Dict(string(field) => getfield(pms, field) for field in fieldnames(Hyperparameters))
 
     # Create dataframe for Arrow saving
-    function create_results(mdi_array, tree_type)
+    function create_results(mdi_array, tree_type, n_features)
         [(tree_type=tree_type, tree=t, feature=f, depth=d, mdi=mdi_array[f, d, t])
-         for t in 1:params.N_TREES, f in 1:params.N_FEAT_SIGNAL, d in 1:params.MAX_DEPTH]
+         for t in 1:pms.N_TREES, f in 1:n_features, d in 1:pms.MAX_DEPTH]
     end
-    df = DataFrame(vcat(
-        create_results(all_mdi_noisy, "noisy"),
-        create_results(all_mdi_signal, "signal")
+    mdi_df = DataFrame(vcat(
+        vec(create_results(all_mdi_noisy, "noisy", N_FEAT_TOTAL)),
+        vec(create_results(all_mdi_signal, "signal", pms.N_FEAT_SIGNAL))
     ))
+
+    # Create dataframe for the dataset
+    dataset_df = DataFrame(hcat(X_noisy, y), :auto)
+    rename!(dataset_df, names(dataset_df)[end] => :y)
 
     # Writing parameters and results to files
     open(json_path, "w") do f
-        JSON.print(f, params_dict, 4)
+        JSON.print(f, pms_dict, 4)
     end
-    Arrow.write(arrow_path, df)
+    Arrow.write(arrow_path, mdi_df)
+    Arrow.write(dataset_path, dataset_df)
     println("\nResults saved successfully.")
-end
-
-"""
-Load simulation parameters and MDI results from JSON and Arrow files.
-"""
-function load_results(base_filename::String; results_dir="results")
-    json_path = joinpath(results_dir, base_filename * ".json")
-    arrow_path = joinpath(results_dir, base_filename * ".arrow")
-
-    if !isfile(json_path) || !isfile(arrow_path)
-        error("Result files not found for $base_filename in `$results_dir` directory.")
-    end
-
-    # Load parameters and convert to struct
-    params_dict = JSON.parsefile(json_path)
-    params = Hyperparameters(; (Symbol(k) => v for (k, v) in params_dict)...)
-
-    # Load MDI data
-    mdi_df = DataFrame(Arrow.Table(arrow_path))
-
-    return params, mdi_df
 end
