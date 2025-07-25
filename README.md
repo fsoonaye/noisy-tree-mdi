@@ -12,8 +12,8 @@ Follow these steps to set up the project locally and install the required depend
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository_url>
-   cd <repository_directory>
+   git clone https://github.com/fsoonaye/noisy-tree-mdi.git
+   cd noisy-tree-mdi
    ```
 
 2. **Install Julia dependencies:**
