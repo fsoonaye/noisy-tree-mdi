@@ -1,0 +1,7 @@
+# macOS specific files
+**/.DS_Store
+
+
+# Ignore all generated plots and results by default.
+/plots/*
+/results/*
